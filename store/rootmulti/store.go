@@ -61,6 +61,7 @@ type Store struct {
 	pruneHeights        []int64
 	initialVersion      int64
 	archivalVersion     int64
+	earliestVersion     int64
 	orphanOpts          *iavltree.Options
 
 	traceWriter       io.Writer
@@ -255,6 +256,15 @@ func (rs *Store) loadVersion(ver int64, upgrades *types.StoreUpgrades) error {
 		storesKeys = append(storesKeys, key)
 	}
 	if upgrades != nil {
+		for _, upgrade := range upgrades.Deleted {
+			deletionStoreKey := types.NewKVStoreKey(upgrade)
+			storesKeys = append(storesKeys, deletionStoreKey)
+			rs.storesParams[deletionStoreKey] = storeParams{
+				key: deletionStoreKey,
+				typ: types.StoreTypeIAVL, // TODO: is this safe
+			}
+			rs.keysByName[upgrade] = deletionStoreKey
+		}
 		// deterministic iteration order for upgrades
 		// (as the underlying store may change and
 		// upgrades make store changes where the execution order may matter)
@@ -282,6 +292,10 @@ func (rs *Store) loadVersion(ver int64, upgrades *types.StoreUpgrades) error {
 		// If it was deleted, remove all data
 		if upgrades.IsDeleted(key.Name()) {
 			deleteKVStore(store.(types.KVStore))
+			// drop deleted KV store from stores
+			delete(newStores, key)
+			delete(rs.keysByName, key.Name())
+			delete(rs.storesParams, key)
 		} else if oldName := upgrades.RenamedFrom(key.Name()); oldName != "" {
 			// handle renames specially
 			// make an unregistered key to satify loadCommitStore params
@@ -526,6 +540,9 @@ func (rs *Store) PruneStores(clearStorePruningHeights bool, pruningHeights []int
 			}
 		}
 	}
+	if len(pruningHeights) > 0 {
+		rs.earliestVersion = pruningHeights[len(pruningHeights)-1]
+	}
 
 	if clearStorePruningHeights {
 		rs.pruneHeights = make([]int64, 0)
@@ -585,6 +602,10 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 	}
 
 	return cachemulti.NewStore(rs.db, cachedStores, rs.keysByName, rs.traceWriter, rs.getTracingContext(), rs.listeners), nil
+}
+
+func (rs *Store) CacheMultiStoreForExport(version int64) (types.CacheMultiStore, error) {
+	return rs.CacheMultiStoreWithVersion(version)
 }
 
 // GetStore returns a mounted Store for a given StoreKey. If the StoreKey does
@@ -795,7 +816,7 @@ func (rs *Store) Snapshot(height uint64, protoWriter protoio.Writer) error {
 		if err != nil {
 			return err
 		}
-
+		rs.logger.Info(fmt.Sprintf("Exporting snapshot for store %s", store.name))
 		for {
 			node, err := exporter.Next()
 			if err == iavltree.ExportDone {
@@ -1196,4 +1217,24 @@ func flushPruningHeights(batch dbm.Batch, pruneHeights []int64) {
 	}
 
 	batch.Set([]byte(pruneHeightsKey), bz)
+}
+
+func (rs *Store) Close() error {
+	return rs.db.Close()
+}
+
+func (rs *Store) SetKVStores(handler func(key types.StoreKey, s types.KVStore) types.CacheWrap) types.MultiStore {
+	panic("SetKVStores is not implemented for rootmulti")
+}
+
+func (rs *Store) StoreKeys() []types.StoreKey {
+	res := make([]types.StoreKey, len(rs.keysByName))
+	for _, sk := range rs.keysByName {
+		res = append(res, sk)
+	}
+	return res
+}
+
+func (rs *Store) GetEarliestVersion() int64 {
+	return rs.earliestVersion
 }

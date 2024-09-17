@@ -23,3 +23,21 @@ func TestSetSnapshotDirectory(t *testing.T) {
 	cfg := DefaultConfig()
 	require.Equal(t, "", cfg.StateSync.SnapshotDirectory)
 }
+
+func TestSetConcurrencyWorkers(t *testing.T) {
+	cfg := DefaultConfig()
+	require.Equal(t, DefaultConcurrencyWorkers, cfg.ConcurrencyWorkers)
+}
+
+func TestOCCEnabled(t *testing.T) {
+	cfg := DefaultConfig()
+	require.False(t, cfg.OccEnabled)
+
+	cfg.BaseConfig.OccEnabled = true
+	require.True(t, cfg.OccEnabled)
+}
+
+func TestDefaultSwaggerConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	require.True(t, cfg.API.Swagger)
+}

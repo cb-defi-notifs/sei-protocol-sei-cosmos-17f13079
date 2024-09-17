@@ -93,6 +93,7 @@ func (suite *IntegrationTestSuite) initKeepersWithmAccPerms(blockedAddrs map[str
 }
 
 func (suite *IntegrationTestSuite) SetupTest() {
+	sdk.RegisterDenom(sdk.DefaultBondDenom, sdk.OneDec())
 	app := simapp.Setup(false)
 	ctx := app.BaseApp.NewContext(false, tmproto.Header{Time: time.Now()})
 
@@ -106,6 +107,49 @@ func (suite *IntegrationTestSuite) SetupTest() {
 	suite.app = app
 	suite.ctx = ctx
 	suite.queryClient = queryClient
+}
+
+func (suite *IntegrationTestSuite) TestSendCoinsAndWei() {
+	ctx := suite.ctx
+	require := suite.Require()
+	sdk.RegisterDenom(sdk.DefaultBondDenom, sdk.OneDec())
+	_, keeper := suite.initKeepersWithmAccPerms(make(map[string]bool))
+	amt := sdk.NewCoins(sdk.NewCoin(sdk.DefaultBondDenom, sdk.NewInt(100)))
+	require.NoError(keeper.MintCoins(ctx, authtypes.Minter, amt))
+	addr1 := sdk.AccAddress([]byte("addr1_______________"))
+	addr2 := sdk.AccAddress([]byte("addr2_______________"))
+	addr3 := sdk.AccAddress([]byte("addr3_______________"))
+	require.NoError(keeper.SendCoinsFromModuleToAccount(ctx, authtypes.Minter, addr1, amt))
+	// should no-op if sending zero
+	require.NoError(keeper.SendCoinsAndWei(ctx, addr1, addr2, sdk.ZeroInt(), sdk.ZeroInt()))
+	require.Equal(sdk.ZeroInt(), keeper.GetWeiBalance(ctx, addr1))
+	require.Equal(sdk.ZeroInt(), keeper.GetWeiBalance(ctx, addr2))
+	require.Equal(sdk.NewInt(100), keeper.GetBalance(ctx, addr1, sdk.DefaultBondDenom).Amount)
+	require.Equal(sdk.ZeroInt(), keeper.GetBalance(ctx, addr2, sdk.DefaultBondDenom).Amount)
+	// should just do usei send if wei is zero
+	require.NoError(keeper.SendCoinsAndWei(ctx, addr1, addr3, sdk.NewInt(50), sdk.ZeroInt()))
+	require.Equal(sdk.ZeroInt(), keeper.GetWeiBalance(ctx, addr1))
+	require.Equal(sdk.ZeroInt(), keeper.GetWeiBalance(ctx, addr3))
+	require.Equal(sdk.NewInt(50), keeper.GetBalance(ctx, addr1, sdk.DefaultBondDenom).Amount)
+	require.Equal(sdk.NewInt(50), keeper.GetBalance(ctx, addr3, sdk.DefaultBondDenom).Amount)
+	// sender gets escrowed one usei, recipient does not get redeemed
+	require.NoError(keeper.SendCoinsAndWei(ctx, addr1, addr2, sdk.NewInt(1), sdk.NewInt(1)))
+	require.Equal(sdk.NewInt(999_999_999_999), keeper.GetWeiBalance(ctx, addr1))
+	require.Equal(sdk.OneInt(), keeper.GetWeiBalance(ctx, addr2))
+	require.Equal(sdk.NewInt(48), keeper.GetBalance(ctx, addr1, sdk.DefaultBondDenom).Amount)
+	require.Equal(sdk.OneInt(), keeper.GetBalance(ctx, addr2, sdk.DefaultBondDenom).Amount)
+	// sender does not get escrowed due to sufficient wei balance, recipient does not get redeemed
+	require.NoError(keeper.SendCoinsAndWei(ctx, addr1, addr3, sdk.NewInt(1), sdk.NewInt(999_999_999_999)))
+	require.Equal(sdk.ZeroInt(), keeper.GetWeiBalance(ctx, addr1))
+	require.Equal(sdk.NewInt(999_999_999_999), keeper.GetWeiBalance(ctx, addr3))
+	require.Equal(sdk.NewInt(47), keeper.GetBalance(ctx, addr1, sdk.DefaultBondDenom).Amount)
+	require.Equal(sdk.NewInt(51), keeper.GetBalance(ctx, addr3, sdk.DefaultBondDenom).Amount)
+	// sender gets escrowed and recipient gets redeemed
+	require.NoError(keeper.SendCoinsAndWei(ctx, addr1, addr3, sdk.NewInt(1), sdk.NewInt(2)))
+	require.Equal(sdk.NewInt(999_999_999_998), keeper.GetWeiBalance(ctx, addr1))
+	require.Equal(sdk.NewInt(1), keeper.GetWeiBalance(ctx, addr3))
+	require.Equal(sdk.NewInt(45), keeper.GetBalance(ctx, addr1, sdk.DefaultBondDenom).Amount)
+	require.Equal(sdk.NewInt(53), keeper.GetBalance(ctx, addr3, sdk.DefaultBondDenom).Amount)
 }
 
 func (suite *IntegrationTestSuite) TestSupply() {
@@ -769,6 +813,96 @@ func (suite *IntegrationTestSuite) TestMsgSendEvents() {
 	suite.Require().Equal(abci.Event(event2), events[9])
 }
 
+func (suite *IntegrationTestSuite) TestMsgSendCoinsAndWeiEvents() {
+	app, ctx := suite.app, suite.ctx
+	addr := sdk.AccAddress([]byte("addr1_______________"))
+	addr2 := sdk.AccAddress([]byte("addr2_______________"))
+	acc := app.AccountKeeper.NewAccountWithAddress(ctx, addr)
+
+	app.AccountKeeper.SetAccount(ctx, acc)
+	newCoins := sdk.NewCoins(sdk.NewInt64Coin(sdk.MustGetBaseDenom(), 50))
+	sendCoins := sdk.NewCoins(sdk.NewInt64Coin(sdk.MustGetBaseDenom(), 40))
+	suite.Require().NoError(simapp.FundAccount(app.BankKeeper, ctx, addr, newCoins))
+
+	ctx = ctx.WithEventManager(sdk.NewEventManager())
+
+	suite.Require().NoError(app.BankKeeper.SendCoinsAndWei(ctx, addr, addr2, sendCoins.AmountOf(sdk.MustGetBaseDenom()), sdk.NewInt(100)))
+	event1 := sdk.Event{
+		Type:       types.EventTypeTransfer,
+		Attributes: []abci.EventAttribute{},
+	}
+	event1.Attributes = append(
+		event1.Attributes,
+		abci.EventAttribute{Key: []byte(types.AttributeKeyRecipient), Value: []byte(addr2.String())},
+	)
+	event1.Attributes = append(
+		event1.Attributes,
+		abci.EventAttribute{Key: []byte(types.AttributeKeySender), Value: []byte(addr.String())},
+	)
+	event1.Attributes = append(
+		event1.Attributes,
+		abci.EventAttribute{Key: []byte(sdk.AttributeKeyAmount), Value: []byte(sendCoins.String())},
+	)
+
+	event2 := sdk.Event{
+		Type:       sdk.EventTypeMessage,
+		Attributes: []abci.EventAttribute{},
+	}
+	event2.Attributes = append(
+		event2.Attributes,
+		abci.EventAttribute{Key: []byte(types.AttributeKeySender), Value: []byte(addr.String())},
+	)
+
+	weiEvent := sdk.Event{
+		Type:       types.EventTypeWeiSpent,
+		Attributes: []abci.EventAttribute{},
+	}
+
+	weiEvent.Attributes = append(
+		weiEvent.Attributes,
+		abci.EventAttribute{Key: []byte(types.AttributeKeySpender), Value: []byte(addr.String())},
+		abci.EventAttribute{Key: []byte(sdk.AttributeKeyAmount), Value: []byte("100")},
+	)
+
+	weiEvent2 := sdk.Event{
+		Type:       types.EventTypeWeiReceived,
+		Attributes: []abci.EventAttribute{},
+	}
+
+	weiEvent2.Attributes = append(
+		weiEvent2.Attributes,
+		abci.EventAttribute{Key: []byte(types.AttributeKeyReceiver), Value: []byte(addr2.String())},
+		abci.EventAttribute{Key: []byte(sdk.AttributeKeyAmount), Value: []byte("100")},
+	)
+
+	weiTransfer := sdk.Event{
+		Type:       types.EventTypeWeiTransfer,
+		Attributes: []abci.EventAttribute{},
+	}
+
+	weiTransfer.Attributes = append(
+		weiTransfer.Attributes,
+		abci.EventAttribute{Key: []byte(types.AttributeKeyRecipient), Value: []byte(addr2.String())},
+		abci.EventAttribute{Key: []byte(types.AttributeKeySender), Value: []byte(addr.String())},
+		abci.EventAttribute{Key: []byte(sdk.AttributeKeyAmount), Value: []byte("100")},
+	)
+
+	// events are shifted due to the funding account events
+	events := ctx.EventManager().ABCIEvents()
+	suite.Require().Equal(7, len(events))
+	suite.Require().Equal(abci.Event(weiTransfer), events[2])
+	suite.Require().Equal(abci.Event(event1), events[5])
+	suite.Require().Equal(abci.Event(event2), events[6])
+	suite.Require().Equal(abci.Event(weiEvent), events[0])
+	suite.Require().Equal(abci.Event(weiEvent2), events[1])
+
+	// verify no wei add and sub events are emitted when the amount is zero
+	ctx = ctx.WithEventManager(sdk.NewEventManager())
+	suite.Require().NoError(app.BankKeeper.SendCoinsAndWei(ctx, addr2, addr, sendCoins.AmountOf(sdk.MustGetBaseDenom()), sdk.ZeroInt()))
+	events = ctx.EventManager().ABCIEvents()
+	suite.Require().Equal(5, len(events))
+}
+
 func (suite *IntegrationTestSuite) TestMsgMultiSendEvents() {
 	app, ctx := suite.app, suite.ctx
 
@@ -1225,6 +1359,24 @@ func (suite *IntegrationTestSuite) TestSetDenomMetaData() {
 	suite.Require().Equal(metadata[1].GetDenomUnits()[1].GetDenom(), actualMetadata.GetDenomUnits()[1].GetDenom())
 	suite.Require().Equal(metadata[1].GetDenomUnits()[1].GetExponent(), actualMetadata.GetDenomUnits()[1].GetExponent())
 	suite.Require().Equal(metadata[1].GetDenomUnits()[1].GetAliases(), actualMetadata.GetDenomUnits()[1].GetAliases())
+}
+
+func (suite *IntegrationTestSuite) TestCanSendTo() {
+	app, ctx := suite.app, suite.ctx
+	badAddr := sdk.AccAddress([]byte("addr1_______________"))
+	goodAddr := sdk.AccAddress([]byte("addr2_______________"))
+	sourceAddr := sdk.AccAddress([]byte("addr3_______________"))
+	app.AccountKeeper.SetAccount(ctx, app.AccountKeeper.NewAccountWithAddress(ctx, badAddr))
+	app.AccountKeeper.SetAccount(ctx, app.AccountKeeper.NewAccountWithAddress(ctx, goodAddr))
+	app.AccountKeeper.SetAccount(ctx, app.AccountKeeper.NewAccountWithAddress(ctx, sourceAddr))
+	suite.Require().NoError(simapp.FundAccount(app.BankKeeper, ctx, sourceAddr, sdk.NewCoins(sdk.NewCoin("usei", sdk.NewInt(100)))))
+	checker := func(_ sdk.Context, addr sdk.AccAddress) bool { return !addr.Equals(badAddr) }
+	app.BankKeeper.RegisterRecipientChecker(checker)
+	amt := sdk.NewCoins(sdk.NewCoin("usei", sdk.NewInt(10)))
+	suite.Require().Nil(app.BankKeeper.SendCoins(ctx, sourceAddr, goodAddr, amt))
+	suite.Require().NotNil(app.BankKeeper.SendCoins(ctx, sourceAddr, badAddr, amt))
+	suite.Require().Nil(app.BankKeeper.SendCoinsAndWei(ctx, sourceAddr, goodAddr, sdk.OneInt(), sdk.ZeroInt()))
+	suite.Require().NotNil(app.BankKeeper.SendCoinsAndWei(ctx, sourceAddr, badAddr, sdk.OneInt(), sdk.ZeroInt()))
 }
 
 func (suite *IntegrationTestSuite) TestIterateAllDenomMetaData() {

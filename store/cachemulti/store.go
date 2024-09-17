@@ -30,6 +30,7 @@ type Store struct {
 	traceContext types.TraceContext
 
 	listeners map[types.StoreKey][]types.WriteListener
+	closers   []io.Closer
 }
 
 var _ types.CacheMultiStore = Store{}
@@ -52,6 +53,7 @@ func NewFromKVStore(
 		traceWriter:  traceWriter,
 		traceContext: traceContext,
 		listeners:    listeners,
+		closers:      []io.Closer{},
 	}
 
 	for key, store := range stores {
@@ -207,4 +209,39 @@ func (cms Store) GetKVStore(key types.StoreKey) types.KVStore {
 
 func (cms Store) GetWorkingHash() ([]byte, error) {
 	panic("should never attempt to get working hash from cache multi store")
+}
+
+// StoreKeys returns a list of all store keys
+func (cms Store) StoreKeys() []types.StoreKey {
+	keys := make([]types.StoreKey, 0, len(cms.stores))
+	for _, key := range cms.keys {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// SetKVStores sets the underlying KVStores via a handler for each key
+func (cms Store) SetKVStores(handler func(sk types.StoreKey, s types.KVStore) types.CacheWrap) types.MultiStore {
+	for k, s := range cms.stores {
+		cms.stores[k] = handler(k, s.(types.KVStore))
+	}
+	return cms
+}
+
+func (cms Store) CacheMultiStoreForExport(_ int64) (types.CacheMultiStore, error) {
+	panic("Not implemented")
+}
+
+func (cms *Store) AddCloser(closer io.Closer) {
+	cms.closers = append(cms.closers, closer)
+}
+
+func (cms Store) Close() {
+	for _, closer := range cms.closers {
+		closer.Close()
+	}
+}
+
+func (cms Store) GetEarliestVersion() int64 {
+	panic("not implemented")
 }

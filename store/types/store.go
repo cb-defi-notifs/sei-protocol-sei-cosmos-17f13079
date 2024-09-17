@@ -113,10 +113,16 @@ type MultiStore interface {
 	// each stored is loaded at a specific version (height).
 	CacheMultiStoreWithVersion(version int64) (CacheMultiStore, error)
 
+	// CacheMultiStoreForExport create a cache multistore specifically for state export
+	CacheMultiStoreForExport(version int64) (CacheMultiStore, error)
+
 	// Convenience for fetching substores.
 	// If the store does not exist, panics.
 	GetStore(StoreKey) Store
 	GetKVStore(StoreKey) KVStore
+
+	// Get the earliest available version for state store
+	GetEarliestVersion() int64
 
 	// TracingEnabled returns if tracing is enabled for the MultiStore.
 	TracingEnabled() bool
@@ -145,6 +151,12 @@ type MultiStore interface {
 
 	// Resets the tracked event list
 	ResetEvents()
+
+	// SetKVStores is a generalized wrapper method
+	SetKVStores(handler func(key StoreKey, s KVStore) CacheWrap) MultiStore
+
+	// StoreKeys returns a list of store keys
+	StoreKeys() []StoreKey
 }
 
 // From MultiStore.CacheMultiStore()....
@@ -153,6 +165,8 @@ type CacheMultiStore interface {
 
 	// Writes operations to underlying KVStore
 	Write()
+
+	Close()
 }
 
 // CommitMultiStore is an interface for a MultiStore without cache capabilities.
@@ -207,6 +221,9 @@ type CommitMultiStore interface {
 
 	// RollbackToVersion rollback the db to specific version(height).
 	RollbackToVersion(version int64) error
+
+	// Close the underline resources
+	io.Closer
 }
 
 //---------subsp-------------------------------
@@ -244,6 +261,12 @@ type KVStore interface {
 	ReverseIterator(start, end []byte) Iterator
 
 	GetWorkingHash() ([]byte, error)
+
+	VersionExists(version int64) bool
+
+	DeleteAll(start, end []byte) error
+
+	GetAllKeyStrsInRange(start, end []byte) []string
 }
 
 // Iterator is an alias db's Iterator for convenience.

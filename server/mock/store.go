@@ -29,6 +29,10 @@ func (ms multiStore) CacheMultiStoreWithVersion(_ int64) (sdk.CacheMultiStore, e
 	panic("not implemented")
 }
 
+func (ms multiStore) CacheMultiStoreForExport(version int64) (store.CacheMultiStore, error) {
+	panic("not implemented")
+}
+
 func (ms multiStore) CacheWrap(_ store.StoreKey) sdk.CacheWrap {
 	panic("not implemented")
 }
@@ -226,6 +230,35 @@ func (kv kvStore) ReverseSubspaceIterator(prefix []byte) sdk.Iterator {
 	panic("not implemented")
 }
 
+func (kv kvStore) VersionExists(version int64) bool {
+	panic("not implemented")
+}
+
+func (kv kvStore) DeleteAll(start, end []byte) error {
+	panic("not implemented")
+}
+
+func (kv kvStore) GetAllKeyStrsInRange(start, end []byte) []string {
+	panic("not implemented")
+}
+
 func NewCommitMultiStore() sdk.CommitMultiStore {
 	return multiStore{kv: make(map[sdk.StoreKey]kvStore)}
+}
+
+func (ms multiStore) Close() error {
+	return nil
+}
+
+func (ms multiStore) SetKVStores(handler func(key store.StoreKey, s sdk.KVStore) store.CacheWrap) store.MultiStore {
+	panic("not implemented")
+}
+
+func (ms multiStore) StoreKeys() []sdk.StoreKey {
+	panic("not implemented")
+}
+
+func (ms multiStore) GetEarliestVersion() int64 {
+	//TODO implement me
+	panic("not implemented")
 }

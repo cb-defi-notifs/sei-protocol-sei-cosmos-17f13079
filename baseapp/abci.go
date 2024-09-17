@@ -21,10 +21,12 @@ import (
 
 	"github.com/cosmos/cosmos-sdk/codec"
 	snapshottypes "github.com/cosmos/cosmos-sdk/snapshots/types"
+	"github.com/cosmos/cosmos-sdk/tasks"
 	"github.com/cosmos/cosmos-sdk/telemetry"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 	"github.com/cosmos/cosmos-sdk/types/legacytm"
+	"github.com/cosmos/cosmos-sdk/utils"
 )
 
 // InitChain implements the ABCI interface. It runs the initialization logic
@@ -67,11 +69,6 @@ func (app *BaseApp) InitChain(ctx context.Context, req *abci.RequestInitChain) (
 	if app.initChainer == nil {
 		return
 	}
-
-	// add block gas meter for any genesis transactions (allow infinite gas)
-	app.deliverState.ctx = app.deliverState.ctx.WithBlockGasMeter(sdk.NewInfiniteGasMeter())
-	app.prepareProposalState.ctx = app.prepareProposalState.ctx.WithBlockGasMeter(sdk.NewInfiniteGasMeter())
-	app.processProposalState.ctx = app.processProposalState.ctx.WithBlockGasMeter(sdk.NewInfiniteGasMeter())
 
 	resp := app.initChainer(app.deliverState.ctx, *req)
 	app.initChainer(app.prepareProposalState.ctx, *req)
@@ -129,6 +126,7 @@ func (app *BaseApp) Info(ctx context.Context, req *abci.RequestInfo) (*abci.Resp
 		AppVersion:       app.appVersion,
 		LastBlockHeight:  lastCommitID.Version,
 		LastBlockAppHash: lastCommitID.Hash,
+		MinimumGasPrices: app.minGasPrices.String(),
 	}, nil
 }
 
@@ -204,7 +202,7 @@ func (app *BaseApp) EndBlock(ctx sdk.Context, req abci.RequestEndBlock) (res abc
 // internal CheckTx state if the AnteHandler passes. Otherwise, the ResponseCheckTx
 // will contain releveant error information. Regardless of tx execution outcome,
 // the ResponseCheckTx will contain relevant gas execution context.
-func (app *BaseApp) CheckTx(ctx context.Context, req *abci.RequestCheckTx) (*abci.ResponseCheckTx, error) {
+func (app *BaseApp) CheckTx(ctx context.Context, req *abci.RequestCheckTx) (*abci.ResponseCheckTxV2, error) {
 	defer telemetry.MeasureSince(time.Now(), "abci", "check_tx")
 
 	var mode runTxMode
@@ -221,25 +219,64 @@ func (app *BaseApp) CheckTx(ctx context.Context, req *abci.RequestCheckTx) (*abc
 	}
 
 	sdkCtx := app.getContextForTx(mode, req.Tx)
-	gInfo, result, _, priority, err := app.runTx(sdkCtx, mode, req.Tx)
+	tx, err := app.txDecoder(req.Tx)
+	if err != nil {
+		res := sdkerrors.ResponseCheckTx(err, 0, 0, app.trace)
+		return &abci.ResponseCheckTxV2{ResponseCheckTx: &res}, err
+	}
+	gInfo, result, _, priority, pendingTxChecker, expireTxHandler, txCtx, err := app.runTx(sdkCtx, mode, tx, sha256.Sum256(req.Tx))
 	if err != nil {
 		res := sdkerrors.ResponseCheckTx(err, gInfo.GasWanted, gInfo.GasUsed, app.trace)
-		return &res, err
+		return &abci.ResponseCheckTxV2{ResponseCheckTx: &res}, err
 	}
 
-	return &abci.ResponseCheckTx{
-		GasWanted: int64(gInfo.GasWanted), // TODO: Should type accept unsigned ints?
-		Data:      result.Data,
-		Priority:  priority,
-	}, nil
+	res := &abci.ResponseCheckTxV2{
+		ResponseCheckTx: &abci.ResponseCheckTx{
+			GasWanted: int64(gInfo.GasWanted), // TODO: Should type accept unsigned ints?
+			Data:      result.Data,
+			Priority:  priority,
+		},
+		ExpireTxHandler:  expireTxHandler,
+		EVMNonce:         txCtx.EVMNonce(),
+		EVMSenderAddress: txCtx.EVMSenderAddress(),
+		IsEVM:            txCtx.IsEVM(),
+	}
+	if pendingTxChecker != nil {
+		res.IsPendingTransaction = true
+		res.Checker = pendingTxChecker
+	}
+
+	return res, nil
+}
+
+// DeliverTxBatch executes multiple txs
+func (app *BaseApp) DeliverTxBatch(ctx sdk.Context, req sdk.DeliverTxBatchRequest) (res sdk.DeliverTxBatchResponse) {
+	responses := make([]*sdk.DeliverTxResult, 0, len(req.TxEntries))
+
+	if len(req.TxEntries) == 0 {
+		return sdk.DeliverTxBatchResponse{Results: responses}
+	}
+
+	// avoid overhead for empty batches
+	scheduler := tasks.NewScheduler(app.concurrencyWorkers, app.TracingInfo, app.DeliverTx)
+	txRes, err := scheduler.ProcessAll(ctx, req.TxEntries)
+	if err != nil {
+		ctx.Logger().Error("error while processing scheduler", "err", err)
+		panic(err)
+	}
+	for _, tx := range txRes {
+		responses = append(responses, &sdk.DeliverTxResult{Response: tx})
+	}
+
+	return sdk.DeliverTxBatchResponse{Results: responses}
 }
 
 // DeliverTx implements the ABCI interface and executes a tx in DeliverTx mode.
 // State only gets persisted if all messages are valid and get executed successfully.
-// Otherwise, the ResponseDeliverTx will contain releveant error information.
+// Otherwise, the ResponseDeliverTx will contain relevant error information.
 // Regardless of tx execution outcome, the ResponseDeliverTx will contain relevant
 // gas execution context.
-func (app *BaseApp) DeliverTx(ctx sdk.Context, req abci.RequestDeliverTx) (res abci.ResponseDeliverTx) {
+func (app *BaseApp) DeliverTx(ctx sdk.Context, req abci.RequestDeliverTx, tx sdk.Tx, checksum [32]byte) (res abci.ResponseDeliverTx) {
 	defer telemetry.MeasureSince(time.Now(), "abci", "deliver_tx")
 	defer func() {
 		for _, streamingListener := range app.abciListeners {
@@ -259,7 +296,7 @@ func (app *BaseApp) DeliverTx(ctx sdk.Context, req abci.RequestDeliverTx) (res a
 		telemetry.SetGauge(float32(gInfo.GasWanted), "tx", "gas", "wanted")
 	}()
 
-	gInfo, result, anteEvents, _, err := app.runTx(ctx.WithTxBytes(req.Tx).WithVoteInfos(app.voteInfos), runTxModeDeliver, req.Tx)
+	gInfo, result, anteEvents, _, _, _, resCtx, err := app.runTx(ctx.WithTxBytes(req.Tx).WithTxSum(checksum).WithVoteInfos(app.voteInfos), runTxModeDeliver, tx, checksum)
 	if err != nil {
 		resultStr = "failed"
 		// if we have a result, use those events instead of just the anteEvents
@@ -269,17 +306,39 @@ func (app *BaseApp) DeliverTx(ctx sdk.Context, req abci.RequestDeliverTx) (res a
 		return sdkerrors.ResponseDeliverTxWithEvents(err, gInfo.GasWanted, gInfo.GasUsed, sdk.MarkEventsToIndex(anteEvents, app.indexEvents), app.trace)
 	}
 
-	return abci.ResponseDeliverTx{
+	res = abci.ResponseDeliverTx{
 		GasWanted: int64(gInfo.GasWanted), // TODO: Should type accept unsigned ints?
 		GasUsed:   int64(gInfo.GasUsed),   // TODO: Should type accept unsigned ints?
 		Log:       result.Log,
 		Data:      result.Data,
 		Events:    sdk.MarkEventsToIndex(result.Events, app.indexEvents),
 	}
+	if resCtx.IsEVM() {
+		res.EvmTxInfo = &abci.EvmTxInfo{
+			SenderAddress: resCtx.EVMSenderAddress(),
+			Nonce:         resCtx.EVMNonce(),
+			TxHash:        resCtx.EVMTxHash(),
+			VmError:       result.EvmError,
+		}
+		// TODO: populate error data for EVM err
+		if result.EvmError != "" {
+			evmErr := sdkerrors.Wrap(sdkerrors.ErrEVMVMError, result.EvmError)
+			res.Codespace, res.Code, res.Log = sdkerrors.ABCIInfo(evmErr, app.trace)
+			resultStr = "failed"
+		}
+	}
+	for _, hook := range app.deliverTxHooks {
+		hook(ctx, tx, checksum, res)
+	}
+	return
 }
 
-func (app *BaseApp) WriteStateToCommitAndGetWorkingHash() []byte {
+func (app *BaseApp) WriteState() sdk.CommitMultiStore {
 	app.stateToCommit.ms.Write()
+	return app.cms
+}
+
+func (app *BaseApp) GetWorkingHash() []byte {
 	hash, err := app.cms.GetWorkingHash()
 	if err != nil {
 		// this should never happen
@@ -314,7 +373,14 @@ func (app *BaseApp) Commit(ctx context.Context) (res *abci.ResponseCommit, err e
 	header := app.stateToCommit.ctx.BlockHeader()
 	retainHeight := app.GetBlockRetentionHeight(header.Height)
 
-	app.WriteStateToCommitAndGetWorkingHash()
+	if app.preCommitHandler != nil {
+		if err := app.preCommitHandler(app.deliverState.ctx); err != nil {
+			panic(fmt.Errorf("error when executing commit handler: %s", err))
+		}
+	}
+
+	app.WriteState()
+	app.GetWorkingHash()
 	app.cms.Commit(true)
 
 	// Reset the Check state to the latest committed.
@@ -344,13 +410,17 @@ func (app *BaseApp) Commit(ctx context.Context) (res *abci.ResponseCommit, err e
 		app.halt()
 	}
 
-	if app.snapshotInterval > 0 && uint64(header.Height)%app.snapshotInterval == 0 {
-		go app.snapshot(header.Height)
-	}
+	app.SnapshotIfApplicable(uint64(header.Height))
 
 	return &abci.ResponseCommit{
 		RetainHeight: retainHeight,
 	}, nil
+}
+
+func (app *BaseApp) SnapshotIfApplicable(height uint64) {
+	if app.snapshotInterval > 0 && height%app.snapshotInterval == 0 {
+		go app.Snapshot(int64(height))
+	}
 }
 
 // halt attempts to gracefully shutdown the node via SIGINT and SIGTERM falling
@@ -375,8 +445,8 @@ func (app *BaseApp) halt() {
 	os.Exit(0)
 }
 
-// snapshot takes a snapshot of the current state and prunes any old snapshottypes.
-func (app *BaseApp) snapshot(height int64) {
+// Snapshot takes a snapshot of the current state and prunes any old snapshottypes.
+func (app *BaseApp) Snapshot(height int64) {
 	if app.snapshotManager == nil {
 		app.logger.Info("snapshot manager not configured")
 		return
@@ -908,7 +978,7 @@ func splitPath(requestPath string) (path []string) {
 }
 
 // ABCI++
-func (app *BaseApp) PrepareProposal(ctx context.Context, req *abci.RequestPrepareProposal) (*abci.ResponsePrepareProposal, error) {
+func (app *BaseApp) PrepareProposal(ctx context.Context, req *abci.RequestPrepareProposal) (resp *abci.ResponsePrepareProposal, err error) {
 	defer telemetry.MeasureSince(time.Now(), "abci", "prepare_proposal")
 
 	header := tmproto.Header{
@@ -942,21 +1012,40 @@ func (app *BaseApp) PrepareProposal(ctx context.Context, req *abci.RequestPrepar
 
 	app.preparePrepareProposalState()
 
+	defer func() {
+		if err := recover(); err != nil {
+			app.logger.Error(
+				"panic recovered in PrepareProposal",
+				"height", req.Height,
+				"time", req.Time,
+				"panic", err,
+			)
+
+			resp = &abci.ResponsePrepareProposal{
+				TxRecords: utils.Map(req.Txs, func(tx []byte) *abci.TxRecord {
+					return &abci.TxRecord{Action: abci.TxRecord_UNMODIFIED, Tx: tx}
+				}),
+			}
+		}
+	}()
+
 	if app.prepareProposalHandler != nil {
-		res, err := app.prepareProposalHandler(app.prepareProposalState.ctx, req)
+		resp, err = app.prepareProposalHandler(app.prepareProposalState.ctx, req)
 		if err != nil {
 			return nil, err
 		}
+
 		if cp := app.GetConsensusParams(app.prepareProposalState.ctx); cp != nil {
-			res.ConsensusParamUpdates = cp
+			resp.ConsensusParamUpdates = cp
 		}
-		return res, nil
-	} else {
-		return nil, errors.New("no prepare proposal handler")
+
+		return resp, nil
 	}
+
+	return nil, errors.New("no prepare proposal handler")
 }
 
-func (app *BaseApp) ProcessProposal(ctx context.Context, req *abci.RequestProcessProposal) (*abci.ResponseProcessProposal, error) {
+func (app *BaseApp) ProcessProposal(ctx context.Context, req *abci.RequestProcessProposal) (resp *abci.ResponseProcessProposal, err error) {
 	defer telemetry.MeasureSince(time.Now(), "abci", "process_proposal")
 
 	header := tmproto.Header{
@@ -988,30 +1077,52 @@ func (app *BaseApp) ProcessProposal(ctx context.Context, req *abci.RequestProces
 		app.setProcessProposalHeader(header)
 	}
 
-	// add block gas meter
-	var gasMeter sdk.GasMeter
-	if maxGas := app.getMaximumBlockGas(app.processProposalState.ctx); maxGas > 0 {
-		gasMeter = sdk.NewGasMeter(maxGas)
-	} else {
-		gasMeter = sdk.NewInfiniteGasMeter()
-	}
-
 	// NOTE: header hash is not set in NewContext, so we manually set it here
 
-	app.prepareProcessProposalState(gasMeter, req.Hash)
+	app.prepareProcessProposalState(req.Hash)
+
+	defer func() {
+		if err := recover(); err != nil {
+			app.logger.Error(
+				"panic recovered in ProcessProposal",
+				"height", req.Height,
+				"time", req.Time,
+				"hash", fmt.Sprintf("%X", req.Hash),
+				"panic", err,
+			)
+
+			resp = &abci.ResponseProcessProposal{Status: abci.ResponseProcessProposal_REJECT}
+		}
+	}()
+
+	defer func() {
+		if err := recover(); err != nil {
+			app.logger.Error(
+				"panic recovered in ProcessProposal",
+				"height", req.Height,
+				"time", req.Time,
+				"hash", fmt.Sprintf("%X", req.Hash),
+				"panic", err,
+			)
+
+			resp = &abci.ResponseProcessProposal{Status: abci.ResponseProcessProposal_REJECT}
+		}
+	}()
 
 	if app.processProposalHandler != nil {
-		res, err := app.processProposalHandler(app.processProposalState.ctx, req)
+		resp, err = app.processProposalHandler(app.processProposalState.ctx, req)
 		if err != nil {
 			return nil, err
 		}
+
 		if cp := app.GetConsensusParams(app.processProposalState.ctx); cp != nil {
-			res.ConsensusParamUpdates = cp
+			resp.ConsensusParamUpdates = cp
 		}
-		return res, nil
-	} else {
-		return nil, errors.New("no process proposal handler")
+
+		return resp, nil
 	}
+
+	return nil, errors.New("no process proposal handler")
 }
 
 func (app *BaseApp) FinalizeBlock(ctx context.Context, req *abci.RequestFinalizeBlock) (*abci.ResponseFinalizeBlock, error) {
@@ -1055,22 +1166,14 @@ func (app *BaseApp) FinalizeBlock(ctx context.Context, req *abci.RequestFinalize
 		app.setDeliverStateHeader(header)
 	}
 
-	// add block gas meter
-	var gasMeter sdk.GasMeter
-	if maxGas := app.getMaximumBlockGas(app.deliverState.ctx); maxGas > 0 {
-		gasMeter = sdk.NewGasMeter(maxGas)
-	} else {
-		gasMeter = sdk.NewInfiniteGasMeter()
-	}
-
 	// NOTE: header hash is not set in NewContext, so we manually set it here
 
-	app.prepareDeliverState(gasMeter, req.Hash)
+	app.prepareDeliverState(req.Hash)
 
 	// we also set block gas meter to checkState in case the application needs to
 	// verify gas consumption during (Re)CheckTx
 	if app.checkState != nil {
-		app.checkState.SetContext(app.checkState.ctx.WithBlockGasMeter(gasMeter).WithHeaderHash(req.Hash))
+		app.checkState.SetContext(app.checkState.ctx.WithHeaderHash(req.Hash))
 	}
 
 	if app.finalizeBlocker != nil {

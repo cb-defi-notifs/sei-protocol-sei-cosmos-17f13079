@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/spf13/viper"
-
 	storetypes "github.com/cosmos/cosmos-sdk/store/types"
 	"github.com/cosmos/cosmos-sdk/telemetry"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
+	"github.com/sei-protocol/sei-db/config"
+	"github.com/spf13/viper"
 	tmcfg "github.com/tendermint/tendermint/config"
 )
 
@@ -21,6 +21,12 @@ const (
 
 	// DefaultGRPCWebAddress defines the default address to bind the gRPC-web server to.
 	DefaultGRPCWebAddress = "0.0.0.0:9091"
+
+	// DefaultConcurrencyWorkers defines the default workers to use for concurrent transactions
+	DefaultConcurrencyWorkers = 20
+
+	// DefaultOccEanbled defines whether to use OCC for tx processing
+	DefaultOccEnabled = false
 )
 
 // BaseConfig defines the server's basic configuration
@@ -88,6 +94,12 @@ type BaseConfig struct {
 	SeparateOrphanVersionsToKeep int64  `mapstructure:"separate-orphan-versions-to-keep"`
 	NumOrphanPerFile             int    `mapstructure:"num-orphan-per-file"`
 	OrphanDirectory              string `mapstructure:"orphan-dir"`
+
+	// ConcurrencyWorkers defines the number of workers to use for concurrent
+	// transaction execution. A value of -1 means unlimited workers.  Default value is 10.
+	ConcurrencyWorkers int `mapstructure:"concurrency-workers"`
+	// Whether to enable optimistic concurrency control for tx execution, default is true
+	OccEnabled bool `mapstructure:"occ-enabled"`
 }
 
 // APIConfig defines the API listener configuration.
@@ -180,17 +192,29 @@ type StateSyncConfig struct {
 	SnapshotDirectory string `mapstructure:"snapshot-directory"`
 }
 
+// GenesisConfig defines the genesis export, validation, and import configuration
+type GenesisConfig struct {
+	// StreamImport defines if the genesis.json is in stream form or not.
+	StreamImport bool `mapstructure:"stream-import"`
+
+	// GenesisStreamFile sets the genesis json file from which to stream from
+	GenesisStreamFile string `mapstructure:"genesis-stream-file"`
+}
+
 // Config defines the server's top level configuration
 type Config struct {
 	BaseConfig `mapstructure:",squash"`
 
 	// Telemetry defines the application telemetry configuration
-	Telemetry telemetry.Config `mapstructure:"telemetry"`
-	API       APIConfig        `mapstructure:"api"`
-	GRPC      GRPCConfig       `mapstructure:"grpc"`
-	Rosetta   RosettaConfig    `mapstructure:"rosetta"`
-	GRPCWeb   GRPCWebConfig    `mapstructure:"grpc-web"`
-	StateSync StateSyncConfig  `mapstructure:"state-sync"`
+	Telemetry   telemetry.Config         `mapstructure:"telemetry"`
+	API         APIConfig                `mapstructure:"api"`
+	GRPC        GRPCConfig               `mapstructure:"grpc"`
+	Rosetta     RosettaConfig            `mapstructure:"rosetta"`
+	GRPCWeb     GRPCWebConfig            `mapstructure:"grpc-web"`
+	StateSync   StateSyncConfig          `mapstructure:"state-sync"`
+	StateCommit config.StateCommitConfig `mapstructure:"state-commit"`
+	StateStore  config.StateStoreConfig  `mapstructure:"state-store"`
+	Genesis     GenesisConfig            `mapstructure:genesis`
 }
 
 // SetMinGasPrices sets the validator's minimum gas prices.
@@ -236,6 +260,8 @@ func DefaultConfig() *Config {
 			IAVLDisableFastNode: true,
 			CompactionInterval:  0,
 			NoVersioning:        false,
+			ConcurrencyWorkers:  DefaultConcurrencyWorkers,
+			OccEnabled:          DefaultOccEnabled,
 		},
 		Telemetry: telemetry.Config{
 			Enabled:      false,
@@ -243,7 +269,7 @@ func DefaultConfig() *Config {
 		},
 		API: APIConfig{
 			Enable:             false,
-			Swagger:            false,
+			Swagger:            true,
 			Address:            "tcp://0.0.0.0:1317",
 			MaxOpenConnections: 1000,
 			RPCReadTimeout:     10,
@@ -269,6 +295,12 @@ func DefaultConfig() *Config {
 			SnapshotInterval:   0,
 			SnapshotKeepRecent: 2,
 			SnapshotDirectory:  "",
+		},
+		StateCommit: config.DefaultStateCommitConfig(),
+		StateStore:  config.DefaultStateStoreConfig(),
+		Genesis: GenesisConfig{
+			StreamImport:      false,
+			GenesisStreamFile: "",
 		},
 	}
 }
@@ -310,6 +342,8 @@ func GetConfig(v *viper.Viper) (Config, error) {
 			SeparateOrphanVersionsToKeep: v.GetInt64("separate-orphan-versions-to-keep"),
 			NumOrphanPerFile:             v.GetInt("num-orphan-per-file"),
 			OrphanDirectory:              v.GetString("orphan-dir"),
+			ConcurrencyWorkers:           v.GetInt("concurrency-workers"),
+			OccEnabled:                   v.GetBool("occ-enabled"),
 		},
 		Telemetry: telemetry.Config{
 			ServiceName:             v.GetString("telemetry.service-name"),
@@ -351,6 +385,29 @@ func GetConfig(v *viper.Viper) (Config, error) {
 			SnapshotInterval:   v.GetUint64("state-sync.snapshot-interval"),
 			SnapshotKeepRecent: v.GetUint32("state-sync.snapshot-keep-recent"),
 			SnapshotDirectory:  v.GetString("state-sync.snapshot-directory"),
+		},
+		StateCommit: config.StateCommitConfig{
+			Enable:              v.GetBool("state-commit.enable"),
+			Directory:           v.GetString("state-commit.directory"),
+			ZeroCopy:            v.GetBool("state-commit.zero-copy"),
+			AsyncCommitBuffer:   v.GetInt("state-commit.async-commit-buffer"),
+			SnapshotKeepRecent:  v.GetUint32("state-commit.snapshot-keep-recent"),
+			SnapshotInterval:    v.GetUint32("state-commit.snapshot-interval"),
+			SnapshotWriterLimit: v.GetInt("state-commit.snapshot-writer-limit"),
+			CacheSize:           v.GetInt("state-commit.cache-size"),
+		},
+		StateStore: config.StateStoreConfig{
+			Enable:               v.GetBool("state-store.enable"),
+			DBDirectory:          v.GetString("state-store.db-directory"),
+			Backend:              v.GetString("state-store.backend"),
+			AsyncWriteBuffer:     v.GetInt("state-store.async-write-buffer"),
+			KeepRecent:           v.GetInt("state-store.keep-recent"),
+			PruneIntervalSeconds: v.GetInt("state-store.prune-interval-seconds"),
+			ImportNumWorkers:     v.GetInt("state-store.import-num-workers"),
+		},
+		Genesis: GenesisConfig{
+			StreamImport:      v.GetBool("genesis.stream-import"),
+			GenesisStreamFile: v.GetString("genesis.genesis-stream-file"),
 		},
 	}, nil
 }

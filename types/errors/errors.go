@@ -147,6 +147,21 @@ var (
 	// ErrInvalidConcurrency defines an error occurred during concurrent execution
 	ErrInvalidConcurrencyExecution = Register(RootCodespace, 41, "error during concurrent execution")
 
+	// ErrAlreadyExists defines an error for which the tx failed checkTx because the node has already seen it before
+	ErrAlreadyExists = Register(RootCodespace, 42, "error tx already exists")
+
+	// ErrOCCAbort defines an error exncountered by a transaction when it encounters an OCC conflict resulting in an Abort
+	ErrOCCAbort = Register(RootCodespace, 43, "occ abort")
+
+	// ErrUnsupportedTxType defines an error for an unsupported transaction type (e.g., EIP-4844 transactions)
+	ErrUnsupportedTxType = Register(RootCodespace, 44, "unsupported transaction type")
+
+	// ErrEVMVMError defines an error for an evm vm error (eg. revert)
+	ErrEVMVMError = Register(RootCodespace, 45, "evm reverted")
+
+	// ErrInvalidRecipient defines an error for sending to disallowed recipients in bank
+	ErrInvalidRecipient = Register(RootCodespace, 46, "invalid bank recipient")
+
 	// ErrPanic is only set when we recover from a panic, so we know to
 	// redact potentially sensitive system info
 	ErrPanic = Register(UndefinedCodespace, 111222, "panic")

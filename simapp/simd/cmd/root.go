@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 
 	serverconfig "github.com/cosmos/cosmos-sdk/server/config"
-	"github.com/cosmos/iavl"
 	"github.com/spf13/cast"
 	"github.com/spf13/cobra"
 	tmmain "github.com/tendermint/tendermint/cmd/tendermint/commands"
@@ -306,12 +305,7 @@ func (a appCreator) newApp(logger log.Logger, db dbm.DB, traceStore io.Writer, t
 		baseapp.SetIAVLCacheSize(cast.ToInt(appOpts.Get(server.FlagIAVLCacheSize))),
 		baseapp.SetIAVLDisableFastNode(cast.ToBool(appOpts.Get(server.FlagIAVLFastNode))),
 		baseapp.SetCompactionInterval(cast.ToUint64(appOpts.Get(server.FlagCompactionInterval))),
-		baseapp.SetOrphanConfig(&iavl.Options{
-			SeparateOrphanStorage:       cast.ToBool(appOpts.Get(server.FlagSeparateOrphanStorage)),
-			SeparateOphanVersionsToKeep: cast.ToInt64(appOpts.Get(server.FlagSeparateOrphanVersionsToKeep)),
-			NumOrphansPerFile:           cast.ToInt(appOpts.Get(server.FlagNumOrphanPerFile)),
-			OrphanDirectory:             cast.ToString(appOpts.Get(server.FlagOrphanDirectory)),
-		}),
+		baseapp.SetOccEnabled(cast.ToBool(appOpts.Get(baseapp.FlagOccEnabled))),
 	)
 }
 
@@ -319,7 +313,7 @@ func (a appCreator) newApp(logger log.Logger, db dbm.DB, traceStore io.Writer, t
 // and exports state.
 func (a appCreator) appExport(
 	logger log.Logger, db dbm.DB, traceStore io.Writer, height int64, forZeroHeight bool, jailAllowedAddrs []string,
-	appOpts servertypes.AppOptions) (servertypes.ExportedApp, error) {
+	appOpts servertypes.AppOptions, file *os.File) (servertypes.ExportedApp, error) {
 
 	var simApp *simapp.SimApp
 	homePath, ok := appOpts.Get(flags.FlagHome).(string)

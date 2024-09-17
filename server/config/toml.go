@@ -7,6 +7,7 @@ import (
 	"os"
 	"text/template"
 
+	"github.com/sei-protocol/sei-db/config"
 	"github.com/spf13/viper"
 )
 
@@ -22,13 +23,15 @@ const DefaultConfigTemplate = `# This is a TOML config file.
 # specified in this config (e.g. 0.25token1;0.0001token2).
 minimum-gas-prices = "{{ .BaseConfig.MinGasPrices }}"
 
-# default: the last 100 states are kept in addition to every 500th state; pruning at 10 block intervals
-# nothing: all historic states will be saved, nothing will be deleted (i.e. archiving node)
-# everything: all saved states will be deleted, storing only the current and previous state; pruning at 10 block intervals
-# custom: allow pruning options to be manually specified through 'pruning-keep-recent', 'pruning-keep-every', and 'pruning-interval'
+# Pruning Strategies:
+# - default: Keep the recent 362880 blocks and prune is triggered every 10 blocks
+# - nothing: all historic states will be saved, nothing will be deleted (i.e. archiving node)
+# - everything: all saved states will be deleted, storing only the recent 2 blocks; pruning at every block
+# - custom: allow pruning options to be manually specified through 'pruning-keep-recent' and 'pruning-interval'
+# Pruning strategy is completely ignored when seidb is enabled
 pruning = "{{ .BaseConfig.Pruning }}"
 
-# These are applied if and only if the pruning strategy is custom.
+# These are applied if and only if the pruning strategy is custom, and seidb is not enabled
 pruning-keep-recent = "{{ .BaseConfig.PruningKeepRecent }}"
 pruning-keep-every = "{{ .BaseConfig.PruningKeepEvery }}"
 pruning-interval = "{{ .BaseConfig.PruningInterval }}"
@@ -72,11 +75,11 @@ inter-block-cache = {{ .BaseConfig.InterBlockCache }}
 # ["message.sender", "message.recipient"]
 index-events = {{ .BaseConfig.IndexEvents }}
 
-# IavlCacheSize set the size of the iavl tree cache. 
+# IavlCacheSize set the size of the iavl tree cache.
 # Default cache size is 50mb.
 iavl-cache-size = {{ .BaseConfig.IAVLCacheSize }}
 
-# IAVLDisableFastNode enables or disables the fast node feature of IAVL. 
+# IAVLDisableFastNode enables or disables the fast node feature of IAVL.
 # Default is true.
 iavl-disable-fastnode = {{ .BaseConfig.IAVLDisableFastNode }}
 
@@ -100,6 +103,12 @@ num-orphan-per-file = {{ .BaseConfig.NumOrphanPerFile }}
 
 # if separate-orphan-storage is true, where to store orphan data
 orphan-dir = "{{ .BaseConfig.OrphanDirectory }}"
+
+# concurrency-workers defines how many workers to run for concurrent transaction execution
+# concurrency-workers = {{ .BaseConfig.ConcurrencyWorkers }}
+
+# occ-enabled defines whether OCC is enabled or not for transaction execution
+occ-enabled = {{ .BaseConfig.OccEnabled }}
 
 ###############################################################################
 ###                         Telemetry Configuration                         ###
@@ -237,7 +246,21 @@ snapshot-keep-recent = {{ .StateSync.SnapshotKeepRecent }}
 # default is emtpy which will then store under the app home directory same as before.
 snapshot-directory = "{{ .StateSync.SnapshotDirectory }}"
 
-`
+###############################################################################
+###                         Genesis Configuration                           ###
+###############################################################################
+
+
+# Genesis config allows configuring whether to stream from an genesis json file in streamed form
+[genesis]
+
+# stream-import specifies whether to the stream the import from the genesis json file. The genesis
+# file must be in stream form and exported in a streaming fashion.
+stream-import = {{ .Genesis.StreamImport }}
+
+# genesis-stream-file specifies the path of the genesis json file to stream from.
+genesis-stream-file = "{{ .Genesis.GenesisStreamFile }}"
+` + config.DefaultConfigTemplate
 
 var configTemplate *template.Template
 

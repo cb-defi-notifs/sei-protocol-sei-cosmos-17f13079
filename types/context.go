@@ -24,26 +24,41 @@ but please do not over-use it. We try to keep all data structured
 and standard additions here would be better just to add to the Context struct
 */
 type Context struct {
-	ctx           context.Context
-	ms            MultiStore
-	header        tmproto.Header
-	headerHash    tmbytes.HexBytes
-	chainID       string
-	txBytes       []byte
-	logger        log.Logger
-	voteInfo      []abci.VoteInfo
-	gasMeter      GasMeter
-	blockGasMeter GasMeter
-	checkTx       bool
-	recheckTx     bool // if recheckTx == true, then checkTx must also be true
-	minGasPrice   DecCoins
-	consParams    *tmproto.ConsensusParams
-	eventManager  *EventManager
-	priority      int64 // The tx priority, only relevant in CheckTx
+	ctx               context.Context
+	ms                MultiStore
+	header            tmproto.Header
+	headerHash        tmbytes.HexBytes
+	chainID           string
+	txBytes           []byte
+	txSum             [32]byte
+	logger            log.Logger
+	voteInfo          []abci.VoteInfo
+	gasMeter          GasMeter
+	occEnabled        bool
+	blockGasMeter     GasMeter
+	checkTx           bool
+	recheckTx         bool // if recheckTx == true, then checkTx must also be true
+	minGasPrice       DecCoins
+	consParams        *tmproto.ConsensusParams
+	eventManager      *EventManager
+	evmEventManager   *EVMEventManager
+	priority          int64                 // The tx priority, only relevant in CheckTx
+	pendingTxChecker  abci.PendingTxChecker // Checker for pending transaction, only relevant in CheckTx
+	checkTxCallback   func(Context, error)  // callback to make at the end of CheckTx. Input param is the error (nil-able) of `runMsgs`
+	deliverTxCallback func(Context)         // callback to make at the end of DeliverTx.
+	expireTxHandler   func()                // callback that the mempool invokes when a tx is expired
 
 	txBlockingChannels   acltypes.MessageAccessOpsChannelMapping
 	txCompletionChannels acltypes.MessageAccessOpsChannelMapping
 	txMsgAccessOps       map[int][]acltypes.AccessOperation
+
+	// EVM properties
+	evm                        bool   // EVM transaction flag
+	evmNonce                   uint64 // EVM Transaction nonce
+	evmSenderAddress           string // EVM Sender address
+	evmTxHash                  string // EVM TX hash
+	evmVmError                 string // EVM VM error during execution
+	evmEntryViaWasmdPrecompile bool   // EVM is entered via wasmd precompile directly
 
 	msgValidator *acltypes.MsgValidator
 	messageIndex int // Used to track current message being processed
@@ -80,6 +95,10 @@ func (c Context) TxBytes() []byte {
 	return c.txBytes
 }
 
+func (c Context) TxSum() [32]byte {
+	return c.txSum
+}
+
 func (c Context) Logger() log.Logger {
 	return c.logger
 }
@@ -92,16 +111,16 @@ func (c Context) GasMeter() GasMeter {
 	return c.gasMeter
 }
 
-func (c Context) BlockGasMeter() GasMeter {
-	return c.blockGasMeter
-}
-
 func (c Context) IsCheckTx() bool {
 	return c.checkTx
 }
 
 func (c Context) IsReCheckTx() bool {
 	return c.recheckTx
+}
+
+func (c Context) IsOCCEnabled() bool {
+	return c.occEnabled
 }
 
 func (c Context) MinGasPrices() DecCoins {
@@ -112,8 +131,52 @@ func (c Context) EventManager() *EventManager {
 	return c.eventManager
 }
 
+func (c Context) EVMEventManager() *EVMEventManager {
+	return c.evmEventManager
+}
+
 func (c Context) Priority() int64 {
 	return c.priority
+}
+
+func (c Context) ExpireTxHandler() abci.ExpireTxHandler {
+	return c.expireTxHandler
+}
+
+func (c Context) EVMSenderAddress() string {
+	return c.evmSenderAddress
+}
+
+func (c Context) EVMNonce() uint64 {
+	return c.evmNonce
+}
+
+func (c Context) EVMTxHash() string {
+	return c.evmTxHash
+}
+
+func (c Context) IsEVM() bool {
+	return c.evm
+}
+
+func (c Context) EVMVMError() string {
+	return c.evmVmError
+}
+
+func (c Context) EVMEntryViaWasmdPrecompile() bool {
+	return c.evmEntryViaWasmdPrecompile
+}
+
+func (c Context) PendingTxChecker() abci.PendingTxChecker {
+	return c.pendingTxChecker
+}
+
+func (c Context) CheckTxCallback() func(Context, error) {
+	return c.checkTxCallback
+}
+
+func (c Context) DeliverTxCallback() func(Context) {
+	return c.deliverTxCallback
 }
 
 func (c Context) TxCompletionChannels() acltypes.MessageAccessOpsChannelMapping {
@@ -172,15 +235,16 @@ func NewContext(ms MultiStore, header tmproto.Header, isCheckTx bool, logger log
 	// https://github.com/gogo/protobuf/issues/519
 	header.Time = header.Time.UTC()
 	return Context{
-		ctx:          context.Background(),
-		ms:           ms,
-		header:       header,
-		chainID:      header.ChainID,
-		checkTx:      isCheckTx,
-		logger:       logger,
-		gasMeter:     stypes.NewInfiniteGasMeter(),
-		minGasPrice:  DecCoins{},
-		eventManager: NewEventManager(),
+		ctx:             context.Background(),
+		ms:              ms,
+		header:          header,
+		chainID:         header.ChainID,
+		checkTx:         isCheckTx,
+		logger:          logger,
+		gasMeter:        NewInfiniteGasMeter(1, 1),
+		minGasPrice:     DecCoins{},
+		eventManager:    NewEventManager(),
+		evmEventManager: NewEVMEventManager(),
 
 		txBlockingChannels:   make(acltypes.MessageAccessOpsChannelMapping),
 		txCompletionChannels: make(acltypes.MessageAccessOpsChannelMapping),
@@ -251,6 +315,11 @@ func (c Context) WithTxBytes(txBytes []byte) Context {
 	return c
 }
 
+func (c Context) WithTxSum(txSum [32]byte) Context {
+	c.txSum = txSum
+	return c
+}
+
 // WithLogger returns a Context with an updated logger.
 func (c Context) WithLogger(logger log.Logger) Context {
 	c.logger = logger
@@ -269,15 +338,15 @@ func (c Context) WithGasMeter(meter GasMeter) Context {
 	return c
 }
 
-// WithBlockGasMeter returns a Context with an updated block GasMeter
-func (c Context) WithBlockGasMeter(meter GasMeter) Context {
-	c.blockGasMeter = meter
-	return c
-}
-
 // WithIsCheckTx enables or disables CheckTx value for verifying transactions and returns an updated Context
 func (c Context) WithIsCheckTx(isCheckTx bool) Context {
 	c.checkTx = isCheckTx
+	return c
+}
+
+// WithIsOCCEnabled enables or disables whether OCC is used as the concurrency algorithm
+func (c Context) WithIsOCCEnabled(isOCCEnabled bool) Context {
+	c.occEnabled = isOCCEnabled
 	return c
 }
 
@@ -306,6 +375,11 @@ func (c Context) WithConsensusParams(params *tmproto.ConsensusParams) Context {
 // WithEventManager returns a Context with an updated event manager
 func (c Context) WithEventManager(em *EventManager) Context {
 	c.eventManager = em
+	return c
+}
+
+func (c Context) WithEvmEventManager(em *EVMEventManager) Context {
+	c.evmEventManager = em
 	return c
 }
 
@@ -346,6 +420,56 @@ func (c Context) WithMsgValidator(msgValidator *acltypes.MsgValidator) Context {
 
 func (c Context) WithTraceSpanContext(ctx context.Context) Context {
 	c.traceSpanContext = ctx
+	return c
+}
+
+func (c Context) WithEVMSenderAddress(address string) Context {
+	c.evmSenderAddress = address
+	return c
+}
+
+func (c Context) WithEVMNonce(nonce uint64) Context {
+	c.evmNonce = nonce
+	return c
+}
+
+func (c Context) WithIsEVM(isEVM bool) Context {
+	c.evm = isEVM
+	return c
+}
+
+func (c Context) WithEVMTxHash(txHash string) Context {
+	c.evmTxHash = txHash
+	return c
+}
+
+func (c Context) WithEVMVMError(vmError string) Context {
+	c.evmVmError = vmError
+	return c
+}
+
+func (c Context) WithEVMEntryViaWasmdPrecompile(e bool) Context {
+	c.evmEntryViaWasmdPrecompile = e
+	return c
+}
+
+func (c Context) WithPendingTxChecker(checker abci.PendingTxChecker) Context {
+	c.pendingTxChecker = checker
+	return c
+}
+
+func (c Context) WithCheckTxCallback(checkTxCallback func(Context, error)) Context {
+	c.checkTxCallback = checkTxCallback
+	return c
+}
+
+func (c Context) WithDeliverTxCallback(deliverTxCallback func(Context)) Context {
+	c.deliverTxCallback = deliverTxCallback
+	return c
+}
+
+func (c Context) WithExpireTxHandler(expireTxHandler func()) Context {
+	c.expireTxHandler = expireTxHandler
 	return c
 }
 

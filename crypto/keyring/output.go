@@ -1,10 +1,15 @@
 package keyring
 
 import (
+	"encoding/hex"
+	"github.com/cosmos/cosmos-sdk/crypto/hd"
+
 	"github.com/cosmos/cosmos-sdk/codec"
+	"github.com/cosmos/cosmos-sdk/codec/legacy"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 // TODO: Move this file to client/keys
@@ -13,11 +18,12 @@ import (
 // KeyOutput defines a structure wrapping around an Info object used for output
 // functionality.
 type KeyOutput struct {
-	Name     string `json:"name" yaml:"name"`
-	Type     string `json:"type" yaml:"type"`
-	Address  string `json:"address" yaml:"address"`
-	PubKey   string `json:"pubkey" yaml:"pubkey"`
-	Mnemonic string `json:"mnemonic,omitempty" yaml:"mnemonic"`
+	Name       string `json:"name" yaml:"name"`
+	Type       string `json:"type" yaml:"type"`
+	Address    string `json:"address" yaml:"address"`
+	EvmAddress string `json:"evm_address" yaml:"evm_address"`
+	PubKey     string `json:"pubkey" yaml:"pubkey"`
+	Mnemonic   string `json:"mnemonic,omitempty" yaml:"mnemonic"`
 }
 
 // NewKeyOutput creates a default KeyOutput instance without Mnemonic, Threshold and PubKeys
@@ -72,7 +78,34 @@ func MkAccKeysOutput(infos []Info) ([]KeyOutput, error) {
 		if err != nil {
 			return nil, err
 		}
+		if info.GetAlgo() == hd.Secp256k1Type {
+			// We only support getting evm-addr if the algo type is secp256k1 (which it should be, though there
+			// may be some legacy keys with sr25519)
+			kos[i], err = PopulateEvmAddrIfApplicable(info, kos[i])
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	return kos, nil
+}
+
+func PopulateEvmAddrIfApplicable(info Info, o KeyOutput) (KeyOutput, error) {
+	localInfo, ok := info.(LocalInfo)
+	if ok {
+		// Only works with secp256k1 algo
+		priv, err := legacy.PrivKeyFromBytes([]byte(localInfo.PrivKeyArmor))
+		if err != nil {
+			return o, err
+		}
+		privHex := hex.EncodeToString(priv.Bytes())
+		privKey, err := crypto.HexToECDSA(privHex)
+		if err != nil {
+			return o, err
+		}
+		o.EvmAddress = crypto.PubkeyToAddress(privKey.PublicKey).Hex()
+	} else {
+	}
+	return o, nil
 }

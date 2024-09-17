@@ -10,7 +10,6 @@ import (
 	"github.com/cosmos/cosmos-sdk/snapshots"
 	"github.com/cosmos/cosmos-sdk/store"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/cosmos/iavl"
 )
 
 // File for storing in-package BaseApp optional functions,
@@ -39,10 +38,6 @@ func SetHaltHeight(blockHeight uint64) func(*BaseApp) {
 // SetHaltTime returns a BaseApp option function that sets the halt block time.
 func SetHaltTime(haltTime uint64) func(*BaseApp) {
 	return func(bapp *BaseApp) { bapp.setHaltTime(haltTime) }
-}
-
-func SetOrphanConfig(opts *iavl.Options) func(*BaseApp) {
-	return func(bapp *BaseApp) { bapp.setOrphanConfig(opts) }
 }
 
 // SetMinRetainBlocks returns a BaseApp option function that sets the minimum
@@ -85,6 +80,14 @@ func SetInterBlockCache(cache sdk.MultiStorePersistentCache) func(*BaseApp) {
 // SetSnapshotInterval sets the snapshot interval.
 func SetSnapshotInterval(interval uint64) func(*BaseApp) {
 	return func(app *BaseApp) { app.SetSnapshotInterval(interval) }
+}
+
+func SetConcurrencyWorkers(workers int) func(*BaseApp) {
+	return func(app *BaseApp) { app.SetConcurrencyWorkers(workers) }
+}
+
+func SetOccEnabled(occEnabled bool) func(*BaseApp) {
+	return func(app *BaseApp) { app.SetOccEnabled(occEnabled) }
 }
 
 // SetSnapshotKeepRecent sets the recent snapshots to keep.
@@ -188,6 +191,22 @@ func (app *BaseApp) SetPrepareProposalHandler(prepareProposalHandler sdk.Prepare
 	app.prepareProposalHandler = prepareProposalHandler
 }
 
+func (app *BaseApp) SetPreCommitHandler(preCommitHandler sdk.PreCommitHandler) {
+	if app.sealed {
+		panic("SetPreCommitHandler() on sealed BaseApp")
+	}
+
+	app.preCommitHandler = preCommitHandler
+}
+
+func (app *BaseApp) SetCloseHandler(closeHandler sdk.CloseHandler) {
+	if app.sealed {
+		panic("SetCloseHandler() on sealed BaseApp")
+	}
+
+	app.closeHandler = closeHandler
+}
+
 func (app *BaseApp) SetProcessProposalHandler(processProposalHandler sdk.ProcessProposalHandler) {
 	if app.sealed {
 		panic("SetProcessProposalHandler() on sealed BaseApp")
@@ -284,7 +303,7 @@ func (app *BaseApp) SetSnapshotStore(snapshotStore *snapshots.Store) {
 		app.snapshotManager = nil
 		return
 	}
-	app.snapshotManager = snapshots.NewManager(snapshotStore, app.cms)
+	app.snapshotManager = snapshots.NewManager(snapshotStore, app.cms, app.logger)
 }
 
 // SetSnapshotInterval sets the snapshot interval.
@@ -293,6 +312,20 @@ func (app *BaseApp) SetSnapshotInterval(snapshotInterval uint64) {
 		panic("SetSnapshotInterval() on sealed BaseApp")
 	}
 	app.snapshotInterval = snapshotInterval
+}
+
+func (app *BaseApp) SetConcurrencyWorkers(workers int) {
+	if app.sealed {
+		panic("SetConcurrencyWorkers() on sealed BaseApp")
+	}
+	app.concurrencyWorkers = workers
+}
+
+func (app *BaseApp) SetOccEnabled(occEnabled bool) {
+	if app.sealed {
+		panic("SetOccEnabled() on sealed BaseApp")
+	}
+	app.occEnabled = occEnabled
 }
 
 // SetSnapshotKeepRecent sets the number of recent snapshots to keep.

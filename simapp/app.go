@@ -2,6 +2,7 @@ package simapp
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,6 +32,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/store/streaming"
 	"github.com/cosmos/cosmos-sdk/testutil/testdata"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	genesistypes "github.com/cosmos/cosmos-sdk/types/genesis"
 	"github.com/cosmos/cosmos-sdk/types/module"
 	"github.com/cosmos/cosmos-sdk/utils"
 	"github.com/cosmos/cosmos-sdk/version"
@@ -515,9 +517,13 @@ func (app *SimApp) FinalizeBlocker(ctx sdk.Context, req *abci.RequestFinalizeBlo
 	txResults := []*abci.ExecTxResult{}
 	for i, tx := range req.Txs {
 		ctx = ctx.WithContext(context.WithValue(ctx.Context(), ante.ContextKeyTxIndexKey, i))
+		if typedTxs[i] == nil {
+			txResults = append(txResults, &abci.ExecTxResult{}) // empty result
+			continue
+		}
 		deliverTxResp := app.DeliverTx(ctx, abci.RequestDeliverTx{
 			Tx: tx,
-		})
+		}, typedTxs[i], sha256.Sum256(tx))
 		txResults = append(txResults, &abci.ExecTxResult{
 			Code:      deliverTxResp.Code,
 			Data:      deliverTxResp.Data,
@@ -535,7 +541,8 @@ func (app *SimApp) FinalizeBlocker(ctx sdk.Context, req *abci.RequestFinalizeBlo
 	events = append(events, endBlockResp.Events...)
 
 	app.SetDeliverStateToCommit()
-	appHash := app.WriteStateToCommitAndGetWorkingHash()
+	app.WriteState()
+	appHash := app.GetWorkingHash()
 	return &abci.ResponseFinalizeBlock{
 		Events:    events,
 		TxResults: txResults,
@@ -588,7 +595,7 @@ func (app *SimApp) InitChainer(ctx sdk.Context, req abci.RequestInitChain) abci.
 		panic(err)
 	}
 	app.UpgradeKeeper.SetModuleVersionMap(ctx, app.mm.GetVersionMap())
-	return app.mm.InitGenesis(ctx, app.appCodec, genesisState)
+	return app.mm.InitGenesis(ctx, app.appCodec, genesisState, genesistypes.GenesisImportConfig{})
 }
 
 // LoadHeight loads a particular height
